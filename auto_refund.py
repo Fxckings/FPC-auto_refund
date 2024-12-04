@@ -12,6 +12,7 @@ from cardinal import Cardinal
 from FunPayAPI.updater.events import NewMessageEvent, NewOrderEvent
 from Utils import cardinal_tools
 import logging
+from collections import defaultdict
 
 logger = logging.getLogger("FPC.REFUND")
 LOGGER_PREFIX = "[AUTOREFUND]"
@@ -43,23 +44,41 @@ CBT_PRICE_CHANGED = "AutoRefund_Price_Changed"
 CBT_SWITCH = "AutoRefund_Switch"
 CBT_CHANGE_TEXT = "AutoRefund_Change_Text"
 
-def init(cardinal: Cardinal):
-    global SETTINGS
+REQUIRED_COLUMNS = list(SETTINGS.keys())
 
+def init(cardinal: Cardinal):
     tg = cardinal.telegram
     bot = tg.bot
 
-    if exists("storage/plugins/auto_refund.json"):
-        with open("storage/plugins/auto_refund.json", "r", encoding="UTF-8") as f:
-            global SETTINGS
-            SETTINGS = json.loads(f.read())
-    else:
-        save_config()
+    def load_config():
+        try:
+            with open("storage/plugins/auto_refund.json", "r", encoding="UTF-8") as f:
+                return json.loads(f.read())
+        except FileNotFoundError:
+            return {}
+        except json.JSONDecodeError:
+            print("Error: Unable to parse JSON file.")
+            return {}
+    
+    def update_config(config):
+        for column in REQUIRED_COLUMNS:
+            config.setdefault(column, SETTINGS[column])
+        return config
 
     def save_config():
         with open("storage/plugins/auto_refund.json", "w", encoding="UTF-8") as f:
-            global SETTINGS
-            f.write(json.dumps(SETTINGS, indent=4, ensure_ascii=False))
+            json.dump(SETTINGS, f, indent=4, ensure_ascii=False)
+
+    config = load_config()
+    if not config:
+        save_config()
+        config = load_config()
+
+    updated_config = update_config(config)
+
+    global SETTINGS
+    SETTINGS.update(updated_config)
+    save_config()
 
     def switch(call: telebot.types.CallbackQuery):
         setting_key = call.data.split(":")[1]
@@ -69,26 +88,28 @@ def init(cardinal: Cardinal):
             settings(call)
 
     def change_max_price(call: telebot.types.CallbackQuery):
-        msg = bot.send_message(call.message.chat.id, "Введите сумму до которой будет делаться возврат")
+        bot.answer_callback_query(call.id)
+
+        msg = bot.send_message(call.message.chat.id, "🔰 Введите сумму до которой будет делаться возврат")
         bot.register_next_step_handler(msg, process_new_max_price)
 
     def process_new_max_price(message):
-        if not message.text.isdigit():
-            raise ValueError("Максимальная сумма для возврата должна быть числом.")
-        
-        new_max_price = float(message.text)
-        if new_max_price < 0:
-            raise ValueError("Максимальная сумма для возврата не может быть отрицательной.")
+        try:
+            new_max_price = float(message.text)
+            if new_max_price < 0:
+                raise ValueError("🚨 Максимальная сумма для возврата должна быть числом.")
+        except ValueError:
+            raise ValueError("🚨 Максимальная сумма для возврата должна быть числом.")
         
         SETTINGS["max_price"] = new_max_price
         save_config()
-        tg.clear_state(message.chat.id, message.from_user.id, True)
-        keyboard = K()
-        keyboard.add(B("◀️ Назад", callback_data=f"{CBT.PLUGIN_SETTINGS}:{UUID}"))
-        bot.reply_to(message, f"✅ Успешно изменено!", reply_markup=keyboard)
+        keyboard = K().row(B("◀️ Назад", callback_data=f"{CBT.PLUGIN_SETTINGS}:{UUID}"))
+        bot.reply_to(message, "✅ Успешно изменено!", reply_markup=keyboard)
 
     def change_text(call: telebot.types.CallbackQuery):
-        msg = bot.send_message(call.message.chat.id, "Введите текст, который будет отправлен пользователю при ЧС.")
+        bot.answer_callback_query(call.id)
+        
+        msg = bot.send_message(call.message.chat.id, "📛 Введите текст, который будет отправлен пользователю при ЧС.")
         bot.register_next_step_handler(msg, process_new_text)
 
     def process_new_text(message):
@@ -108,18 +129,20 @@ def init(cardinal: Cardinal):
         settings(call)
 
     def settings(call: telebot.types.CallbackQuery):
+        logger.info(f"{LOGGER_PREFIX} Пользователь {call.from_user.username} открыл настройки плагина")
+
         keyboard = K()
 
         options = [
-            ("Возврат до суммы", SETTINGS['max_price'], CBT_PRICE_CHANGE, False),
-            ("Изменить текст при чс", SETTINGS['blacklist_message'][:5], CBT_CHANGE_TEXT, False),
-            ("Добавлять пользователя в чс", SETTINGS['block_user'], f"{CBT_SWITCH}:block_user", True),
-            ("Уведомления о возвратах", SETTINGS['refund_notification'], f"{CBT_SWITCH}:refund_notification", True),
-            ("Черный список при удалении отзыва", SETTINGS['feedback_delete'], f"{CBT_SWITCH}:feedback_delete", True)
+            ("Возврат до:", SETTINGS.get('max_price', ''), CBT_PRICE_CHANGE, False),
+            ("Текст при ЧС:", SETTINGS.get('blacklist_message', '')[:5] + "...", CBT_CHANGE_TEXT, False),
+            ("Добавлять в ЧС?", SETTINGS.get('block_user', False), f"{CBT_SWITCH}:block_user", True),
+            ("Уведомления?", SETTINGS.get('refund_notification', False), f"{CBT_SWITCH}:refund_notification", True),
+            ("ЧС при удалении отзыва?", SETTINGS.get('feedback_delete', False), f"{CBT_SWITCH}:feedback_delete", True)
         ]
 
         for label, setting, callback, is_toggle in options:
-            state = f"{'вкл' if setting else 'выкл'}" if is_toggle else setting
+            state = f"{'✅' if setting else '❌'}" if is_toggle else setting
             keyboard.add(B(f"{label}: {state}", callback_data=callback))
 
         for i in range(1, 6):
@@ -134,73 +157,69 @@ def init(cardinal: Cardinal):
 
     tg.cbq_handler(toggle_refund_notifications, lambda c: f"{CBT_SWITCH}:refund_notification" in c.data)
     tg.cbq_handler(settings, lambda c: f"{CBT.PLUGIN_SETTINGS}:{UUID}" in c.data)
-    tg.cbq_handler(switch, lambda c: f"{CBT_SWITCH}" in c.data)
+    tg.cbq_handler(switch, lambda c: CBT_SWITCH in c.data)
     tg.cbq_handler(change_max_price, lambda c: f"{CBT_PRICE_CHANGE}" in c.data)
     tg.cbq_handler(change_text, lambda c: CBT_CHANGE_TEXT in c.data)
 
-
-
-def message_hook(cardinal: Cardinal, event: NewMessageEvent):
+def message_hook(cardinal: Cardinal, event: NewMessageEvent) -> None:
     global SETTINGS
 
-    if event.message.type not in [MessageTypes.NEW_FEEDBACK, MessageTypes.FEEDBACK_CHANGED, MessageTypes.FEEDBACK_DELETED]:
+    if event.message.type not in (MessageTypes.NEW_FEEDBACK, MessageTypes.FEEDBACK_CHANGED, MessageTypes.FEEDBACK_DELETED):
         return
     if event.message.author_id == cardinal.account.id:
         return
 
-    id_ = RegularExpressions().ORDER_ID.findall(str(event.message))[0][1:]
-    order = cardinal.account.get_order(id_)
-    if order.status == types.OrderStatuses.REFUNDED:
-        return
-    
-    tg = cardinal.telegram
+    if event.message.type == MessageTypes.FEEDBACK_DELETED and SETTINGS["feedback_delete"]:
+        order_id = RegularExpressions().ORDER_ID.findall(str(event.message))[0][1:]
+        order = cardinal.account.get_order(order_id)
+        if order.status == types.OrderStatuses.REFUNDED or order.sum > SETTINGS["max_price"]:
+            return
 
-    if event.message.type == MessageTypes.FEEDBACK_DELETED:
-        if SETTINGS["feedback_delete"] and order.sum <= SETTINGS["max_price"]:
+        if order.buyer_username in cardinal.blacklist:
+            logger.info(f"{LOGGER_PREFIX} {order.buyer_username} уже в черном списке")
+        else:
+            cardinal.blacklist.append(order.buyer_username)
+            cardinal_tools.cache_blacklist(cardinal.blacklist)
+            cardinal.account.send_message(event.message.chat_id, SETTINGS['blacklist_message'])
+            if SETTINGS["refund_notification"]:
+                chat_id = SETTINGS["refund_notification_chat_id"]
+                cardinal.telegram.bot.send_message(chat_id, f"{LOGGER_PREFIX} {order.buyer_username} добавлен в чс")
+                logger.info(f"{LOGGER_PREFIX} добавил в ЧС {order.buyer_username} и отправил уведомление")
+
+    elif event.message.type in (MessageTypes.NEW_FEEDBACK, MessageTypes.FEEDBACK_CHANGED):
+        order_id = RegularExpressions().ORDER_ID.findall(str(event.message))[0][1:]
+        order = cardinal.account.get_order(order_id)
+        if order.sum > SETTINGS["max_price"]:
+            return
+
+        if order.review and SETTINGS[f"star_{order.review.stars}"]:
             if order.buyer_username in cardinal.blacklist:
-                logger.info(f"{LOGGER_PREFIX} Чорт с {order.buyer_username} уже находится в чс") 
-
+                cardinal.account.refund(order_id)
             else:
+                cardinal.account.refund(order_id)
                 cardinal.blacklist.append(order.buyer_username)
                 cardinal_tools.cache_blacklist(cardinal.blacklist)
                 cardinal.account.send_message(event.message.chat_id, SETTINGS['blacklist_message'])
-
-                if SETTINGS.get("refund_notification", False): 
-                    chat_id = SETTINGS.get("refund_notification_chat_id")
-                    tg.bot.send_message(chat_id, f"{LOGGER_PREFIX} Пользователь {order.buyer_username} добавлен в черный список магазина.")
-                    logger.info(f"{LOGGER_PREFIX} добавил в ЧС {order.buyer_username} и отправил уведомление")
-
-    else:
-        if SETTINGS[f"star_{order.review.stars}"] and order.sum <= SETTINGS["max_price"]:
-            if order.buyer_username in cardinal.blacklist:
-                cardinal.account.refund(id_)
-
-            else:
-                cardinal.account.refund(id_)
-                cardinal.blacklist.append(order.buyer_username)
-                cardinal_tools.cache_blacklist(cardinal.blacklist)
-                cardinal.account.send_message(event.message.chat_id, SETTINGS['blacklist_message'])
-                if SETTINGS.get("refund_notification", False): 
-                    chat_id = SETTINGS.get("refund_notification_chat_id")
-                    tg.bot.send_message(chat_id, f"{LOGGER_PREFIX} Пользователь {order.buyer_username} добавлен в черный список магазина. Выполнен возврат.")
+                if SETTINGS["refund_notification"]:
+                    chat_id = SETTINGS["refund_notification_chat_id"]
+                    cardinal.telegram.bot.send_message(chat_id, f"{LOGGER_PREFIX} {order.buyer_username} добавлен в чс. Выполнен возврат.")
                     logger.info(f"{LOGGER_PREFIX} сделал возврат и добавил в ЧС {order.buyer_username} и отправил уведомление")
-
 
 def order_hook(cardinal: Cardinal, event: NewOrderEvent) -> None:
     global SETTINGS
 
-    if event.order.buyer_username in cardinal.blacklist and event.order.sum <= SETTINGS["max_price"]:
-        tg = cardinal.telegram
-        chat_id = cardinal.account.get_chat_by_name(event.order.buyer_username).id
-        cardinal.account.refund(event.order.id)
-        cardinal.account.send_message(chat_id, SETTINGS['blacklist_message'])
+    if event.order.buyer_username not in cardinal.blacklist or event.order.sum > SETTINGS["max_price"]:
+        return
 
-        if SETTINGS.get("refund_notification", False):
-            notification_chat_id = SETTINGS.get("refund_notification_chat_id")
-            tg.bot.send_message(notification_chat_id, f"{LOGGER_PREFIX} Пользователь {event.order.buyer_username} попытался купить товар, он в черном списке магазина. Выполнен возврат.")
-            logger.info(f"{LOGGER_PREFIX} сделал возврат так как {event.order.buyer_username} в ЧС и отправил уведомление")
+    tg = cardinal.telegram
+    chat_id = cardinal.account.get_chat_by_name(event.order.buyer_username).id
+    cardinal.account.refund(event.order.id)
+    cardinal.account.send_message(chat_id, SETTINGS['blacklist_message'])
 
-
+    if SETTINGS.get("refund_notification", False):
+        notification_chat_id = SETTINGS.get("refund_notification_chat_id")
+        tg.bot.send_message(notification_chat_id, f"{LOGGER_PREFIX} Пользователь {event.order.buyer_username} попытался купить товар, он в черном списке магазина. Выполнен возврат.")
+        logger.info(f"{LOGGER_PREFIX} сделал возврат так как {event.order.buyer_username} в ЧС и отправил уведомление")
 
 BIND_TO_PRE_INIT = [init]
 BIND_TO_NEW_MESSAGE = [message_hook]
