@@ -20,7 +20,7 @@ logger.info(f"{LOGGER_PREFIX} Плагин успешно запущен.")
 NAME = "Auto Refund"
 VERSION = "0.0.5"
 DESCRIPTION = "Данный плагин автоматически возвращает средства, если покупатель оставил плохой отзыв."
-CREDITS = "@cloudecode | @vsevolodezz"
+CREDITS = "@fasxw | @vsevolodezz"
 UUID = "d1fa6712-6780-4d36-b7b7-e1ac2b7a9e1a"
 SETTINGS_PAGE = True
 
