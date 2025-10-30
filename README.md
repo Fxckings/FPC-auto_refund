@@ -64,8 +64,8 @@
 
 ## Архитектура
 ```
+auto_refund_plugin                  # Точка входа
 auto_refund/
-├── plugin.py                  # Точка входа
 ├── core/
 │   ├── config.py             # Конфигурация
 │   ├── refund_processor.py   # Обработка отзывов
